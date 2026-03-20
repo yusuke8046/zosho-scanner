@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>バーコードスキャン</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #111; color: #fff;
+    font-family: 'Hiragino Sans', sans-serif;
+    min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; padding: 20px;
+  }
+  h1 { font-size: 18px; margin-bottom: 8px; letter-spacing: 0.05em; }
+  .sub { font-size: 12px; color: #aaa; margin-bottom: 24px; text-align: center; line-height: 1.6; }
+
+  /* カメラビュー */
+  #video-wrap {
+    position: relative; width: 100%; max-width: 400px;
+    border-radius: 12px; overflow: hidden; background: #000;
+    aspect-ratio: 4/3;
+  }
+  video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .overlay {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .frame {
+    width: 70%; aspect-ratio: 3/1;
+    border: 2px solid rgba(255,255,255,0.8);
+    border-radius: 4px; position: relative;
+    box-shadow: 0 0 0 1000px rgba(0,0,0,0.45);
+  }
+  .scan-line {
+    position: absolute; left: 0; right: 0; height: 2px;
+    background: #e53; top: 50%;
+    box-shadow: 0 0 8px #e53;
+    animation: sweep 2s ease-in-out infinite;
+  }
+  @keyframes sweep { 0%,100%{top:10%} 50%{top:88%} }
+
+  #status {
+    margin-top: 16px; font-size: 14px; min-height: 20px;
+    color: #aaa; text-align: center; line-height: 1.6;
+  }
+  #status.ok { color: #4c8; }
+  #status.err { color: #e86; }
+
+  .btn {
+    margin-top: 20px; padding: 14px 32px;
+    background: #8b2e2e; color: #fff; border: none;
+    border-radius: 8px; font-size: 15px; font-weight: 700;
+    cursor: pointer; width: 100%; max-width: 400px;
+    font-family: inherit;
+  }
+  .btn:active { background: #6e2424; }
+  .btn-sub {
+    background: #333; margin-top: 10px;
+  }
+
+  /* GASのURLが未設定の場合の設定画面 */
+  #setup { display: none; width: 100%; max-width: 400px; }
+  #setup p { font-size: 12px; color: #aaa; margin-bottom: 8px; line-height: 1.6; }
+  #setup input {
+    width: 100%; padding: 12px; border-radius: 8px;
+    border: 1px solid #444; background: #222; color: #fff;
+    font-size: 13px; font-family: monospace; margin-bottom: 10px;
+  }
+</style>
+</head>
+<body>
+
+<h1>📷 バーコードスキャン</h1>
+<p class="sub">本の裏面のバーコードを枠内に合わせてください</p>
+
+<div id="video-wrap">
+  <video id="video" autoplay playsinline muted></video>
+  <div class="overlay">
+    <div class="frame"><div class="scan-line"></div></div>
+  </div>
+</div>
+
+<div id="status">カメラを起動中…</div>
+
+<button class="btn btn-sub" onclick="switchCamera()">📷 カメラ切替</button>
+
+<!-- GAS URLが未設定の場合 -->
+<div id="setup">
+  <p style="margin-top:20px">GASアプリのURLを入力してください（初回のみ）</p>
+  <input type="text" id="gas-url-input" placeholder="https://script.google.com/macros/s/...">
+  <button class="btn" onclick="saveGasUrl()">保存</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js"></script>
+<script>
+const GAS_URL_KEY = 'zosho_gas_url';
+let facingMode = 'environment';
+let scanning = true;
+
+function getGasUrl() {
+  // URLパラメータから取得（GASから遷移した場合）
+  const params = new URLSearchParams(location.search);
+  const fromUrl = params.get('return');
+  if (fromUrl) {
+    localStorage.setItem(GAS_URL_KEY, decodeURIComponent(fromUrl));
+  }
+  return localStorage.getItem(GAS_URL_KEY) || '';
+}
+
+function saveGasUrl() {
+  const url = document.getElementById('gas-url-input').value.trim();
+  if (!url) return;
+  localStorage.setItem(GAS_URL_KEY, url);
+  document.getElementById('setup').style.display = 'none';
+  startScanner();
+}
+
+function startScanner() {
+  const gasUrl = getGasUrl();
+  if (!gasUrl) {
+    setStatus('GASのURLを入力してください', 'err');
+    document.getElementById('setup').style.display = 'block';
+    return;
+  }
+
+  Quagga.init({
+    inputStream: {
+      name: 'Live',
+      type: 'LiveStream',
+      target: document.getElementById('video-wrap'),
+      constraints: {
+        facingMode: facingMode,
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      }
+    },
+    decoder: {
+      readers: ['ean_reader', 'ean_8_reader']
+    },
+    locate: true,
+    frequency: 10
+  }, err => {
+    if (err) {
+      setStatus('カメラの起動に失敗しました: ' + err, 'err');
+      return;
+    }
+    Quagga.start();
+    setStatus('バーコードを枠内に合わせてください');
+  });
+
+  let lastCode = '', lastTime = 0;
+  Quagga.onDetected(result => {
+    if (!scanning) return;
+    const code = result.codeResult.code;
+    const now = Date.now();
+    if (code === lastCode && now - lastTime < 2000) return;
+    lastCode = code; lastTime = now;
+
+    if (code.length === 13 && (code.startsWith('978') || code.startsWith('979'))) {
+      scanning = false;
+      Quagga.stop();
+      setStatus(`✅ ISBN検出: ${code}`, 'ok');
+
+      // GASアプリにISBNを渡してリダイレクト
+      setTimeout(() => {
+        const gasUrl = getGasUrl();
+        location.href = `${gasUrl}?isbn=${code}`;
+      }, 800);
+    }
+  });
+}
+
+function switchCamera() {
+  facingMode = facingMode === 'environment' ? 'user' : 'environment';
+  Quagga.stop();
+  scanning = true;
+  startScanner();
+}
+
+function setStatus(msg, type = '') {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = type;
+}
+
+// 起動
+startScanner();
+</script>
+</body>
+</html>
